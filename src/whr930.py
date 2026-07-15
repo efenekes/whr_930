@@ -263,6 +263,7 @@ def validate_data(data_raw):
 
 def serial_command(cmd):
     data = []
+    ser.reset_input_buffer()
     ser.write(cmd)
     time.sleep(2)
 
@@ -1097,6 +1098,7 @@ def main():
         bytesize=serial.EIGHTBITS,
         parity=serial.PARITY_NONE,
         stopbits=serial.STOPBITS_ONE,
+        timeout=2,
     )
 
     mqttc.loop_start()
