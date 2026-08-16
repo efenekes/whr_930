@@ -8,12 +8,15 @@ Publish every 5 seconds the status on a MQTT topic
 Listen on MQTT topic for commands to set the ventilation level
 """
 
+import glob
+import os
 import paho.mqtt.client as mqtt
-import time
-import sys
-import serial
-import yaml
 from pathlib import Path
+import serial
+import serial.tools.list_ports
+import sys
+import time
+import yaml
 
 
 def debug_msg(message):
@@ -1060,6 +1063,53 @@ def on_disconnect(client, userdata, rc):
         recon()
 
 
+def auto_detect_serial_port(configured_port=None):
+    """
+    Intelligently discover and resolve the WHR930 Zehnder ventilation serial port:
+    1. Validate if configured_port (e.g. /dev/ttyWHR930) exists and resolves.
+    2. Check persistent udev by-id symlinks in /dev/serial/by-id/ for Prolific/PL2303/WHR930.
+    3. Scan system ports using serial.tools.list_ports for VID:PID 067b:2303 (Prolific PL2303)
+       while explicitly ignoring known non-WHR devices (e.g. CP2102 ESP32 console 10c4:ea60).
+    4. Fall back to any available non-ESP32 /dev/ttyUSB* device.
+    """
+    if configured_port and os.path.exists(configured_port):
+        real_dev = os.path.realpath(configured_port)
+        info_msg("Using configured serial port: {0} (resolves to {1})".format(configured_port, real_dev))
+        return real_dev
+
+    try:
+        by_id_devices = glob.glob("/dev/serial/by-id/*")
+        for path in by_id_devices:
+            base = os.path.basename(path).lower()
+            if ("prolific" in base or "pl2303" in base or "whr930" in base or "usb-serial" in base) and "cp2102" not in base:
+                real_dev = os.path.realpath(path)
+                info_msg("Auto-detected WHR930 adapter via by-id symlink: {0} -> {1}".format(path, real_dev))
+                return real_dev
+    except Exception as e:
+        debug_msg("Error searching /dev/serial/by-id: {0}".format(e))
+
+    try:
+        ports = serial.tools.list_ports.comports()
+        for p in ports:
+            if p.vid == 0x10c4 and p.pid == 0xea60:
+                continue
+            desc = (p.description or "").lower()
+            if (p.vid == 0x067b and p.pid == 0x2303) or "prolific" in desc or "pl2303" in desc or "whr930" in desc:
+                info_msg("Auto-detected WHR930 serial adapter: {0} ({1} [{2:04x}:{3:04x}])".format(p.device, p.description, p.vid or 0, p.pid or 0))
+                return p.device
+
+        for p in ports:
+            if not (p.vid == 0x10c4 and p.pid == 0xea60) and p.device.startswith("/dev/ttyUSB"):
+                info_msg("Fallback auto-detected USB serial device: {0} ({1})".format(p.device, p.description))
+                return p.device
+    except Exception as e:
+        debug_msg("Error scanning comport devices: {0}".format(e))
+
+    fallback = configured_port or "/dev/ttyWHR930"
+    warning_msg("Could not auto-detect WHR930 port. Falling back to default: {0}".format(fallback))
+    return fallback
+
+
 def main():
     global debug
     global debug_level
@@ -1091,9 +1141,10 @@ def main():
     """Connect to the MQTT server"""
     mqttc.connect(config["mqtt_server"], port=1883, keepalive=45)
 
-    """Open the serial port"""
+    """Detect and open the serial port"""
+    active_port = auto_detect_serial_port(config.get("port", "/dev/ttyWHR930"))
     ser = serial.Serial(
-        port=config["port"],
+        port=active_port,
         baudrate=9600,
         bytesize=serial.EIGHTBITS,
         parity=serial.PARITY_NONE,
